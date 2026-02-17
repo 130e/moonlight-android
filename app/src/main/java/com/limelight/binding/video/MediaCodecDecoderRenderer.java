@@ -36,6 +36,7 @@ import android.os.SystemClock;
 import android.util.Range;
 import android.view.Choreographer;
 import android.view.SurfaceHolder;
+import android.widget.Toast;
 
 public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements Choreographer.FrameCallback {
 
@@ -110,6 +111,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private VideoStats activeWindowVideoStats;
     private VideoStats lastWindowVideoStats;
     private VideoStats globalVideoStats;
+    private VideoCaptureSession captureSession;
+    private boolean captureCapToastShown;
 
     private long lastTimestampUs;
     private int lastFrameNumber;
@@ -706,8 +709,27 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         this.initialHeight = height;
         this.videoFormat = format;
         this.refreshRate = redrawRate;
+        this.captureCapToastShown = false;
 
-        return initializeDecoder(false);
+        int result = initializeDecoder(false);
+        if (result == 0) {
+            captureSession = new VideoCaptureSession(context, prefs, format, width, height, redrawRate, new Runnable() {
+                @Override
+                public void run() {
+                    if (!captureCapToastShown) {
+                        captureCapToastShown = true;
+                        activity.runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                Toast.makeText(activity, R.string.toast_video_capture_cap_reached, Toast.LENGTH_SHORT).show();
+                            }
+                        });
+                    }
+                }
+            });
+        }
+
+        return result;
     }
 
     // All threads that interact with the MediaCodec instance must call this function regularly!
@@ -1127,6 +1149,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     activeWindowVideoStats.totalTimeMs += delta;
                                 }
                             }
+
+                            VideoCaptureSession localCaptureSession = captureSession;
+                            if (localCaptureSession != null && localCaptureSession.isActive()) {
+                                localCaptureSession.onFrameDecoded(presentationTimeUs, delta);
+                            }
                         } else {
                             switch (outIndex) {
                                 case MediaCodec.INFO_TRY_AGAIN_LATER:
@@ -1294,10 +1321,21 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             // status back to true.
             Thread.currentThread().interrupt();
         }
+
+        VideoCaptureSession localCaptureSession = captureSession;
+        if (localCaptureSession != null) {
+            localCaptureSession.onSessionEnd("stream_stopped");
+            captureSession = null;
+        }
     }
 
     @Override
     public void cleanup() {
+        VideoCaptureSession localCaptureSession = captureSession;
+        if (localCaptureSession != null) {
+            localCaptureSession.onSessionEnd("stream_cleanup");
+            captureSession = null;
+        }
         videoDecoder.release();
     }
 
@@ -1604,6 +1642,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
                 // Batch this to submit together with other CSD per AOSP docs
                 spsBuffers.add(naluBuffer);
+
+                VideoCaptureSession localCaptureSession = captureSession;
+                if (localCaptureSession != null && localCaptureSession.isActive()) {
+                    localCaptureSession.onDecodeUnit(decodeUnitData, decodeUnitLength, decodeUnitType,
+                            frameNumber, frameType, frameHostProcessingLatency, receiveTimeMs, enqueueTimeMs, enqueueTimeMs * 1000);
+                }
                 return MoonBridge.DR_OK;
             }
             else if (decodeUnitType == MoonBridge.BUFFER_TYPE_VPS) {
@@ -1613,6 +1657,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 byte[] naluBuffer = new byte[decodeUnitLength];
                 System.arraycopy(decodeUnitData, 0, naluBuffer, 0, decodeUnitLength);
                 vpsBuffers.add(naluBuffer);
+
+                VideoCaptureSession localCaptureSession = captureSession;
+                if (localCaptureSession != null && localCaptureSession.isActive()) {
+                    localCaptureSession.onDecodeUnit(decodeUnitData, decodeUnitLength, decodeUnitType,
+                            frameNumber, frameType, frameHostProcessingLatency, receiveTimeMs, enqueueTimeMs, enqueueTimeMs * 1000);
+                }
                 return MoonBridge.DR_OK;
             }
             // Only the HEVC SPS hits this path (H.264 is handled above)
@@ -1623,6 +1673,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 byte[] naluBuffer = new byte[decodeUnitLength];
                 System.arraycopy(decodeUnitData, 0, naluBuffer, 0, decodeUnitLength);
                 spsBuffers.add(naluBuffer);
+
+                VideoCaptureSession localCaptureSession = captureSession;
+                if (localCaptureSession != null && localCaptureSession.isActive()) {
+                    localCaptureSession.onDecodeUnit(decodeUnitData, decodeUnitLength, decodeUnitType,
+                            frameNumber, frameType, frameHostProcessingLatency, receiveTimeMs, enqueueTimeMs, enqueueTimeMs * 1000);
+                }
                 return MoonBridge.DR_OK;
             }
             else if (decodeUnitType == MoonBridge.BUFFER_TYPE_PPS) {
@@ -1632,6 +1688,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 byte[] naluBuffer = new byte[decodeUnitLength];
                 System.arraycopy(decodeUnitData, 0, naluBuffer, 0, decodeUnitLength);
                 ppsBuffers.add(naluBuffer);
+
+                VideoCaptureSession localCaptureSession = captureSession;
+                if (localCaptureSession != null && localCaptureSession.isActive()) {
+                    localCaptureSession.onDecodeUnit(decodeUnitData, decodeUnitLength, decodeUnitType,
+                            frameNumber, frameType, frameHostProcessingLatency, receiveTimeMs, enqueueTimeMs, enqueueTimeMs * 1000);
+                }
                 return MoonBridge.DR_OK;
             }
             else if ((videoFormat & (MoonBridge.VIDEO_FORMAT_MASK_H264 | MoonBridge.VIDEO_FORMAT_MASK_H265)) != 0) {
@@ -1728,6 +1790,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             timestampUs = lastTimestampUs + 1;
         }
         lastTimestampUs = timestampUs;
+
+        VideoCaptureSession localCaptureSession = captureSession;
+        if (localCaptureSession != null && localCaptureSession.isActive()) {
+            localCaptureSession.onDecodeUnit(decodeUnitData, decodeUnitLength, decodeUnitType,
+                    frameNumber, frameType, frameHostProcessingLatency, receiveTimeMs, enqueueTimeMs, timestampUs);
+        }
 
         numFramesIn++;
 

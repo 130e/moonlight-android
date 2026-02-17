@@ -49,6 +49,9 @@ public class PreferenceConfiguration {
     private static final String ENABLE_HDR_PREF_STRING = "checkbox_enable_hdr";
     private static final String ENABLE_PIP_PREF_STRING = "checkbox_enable_pip";
     private static final String ENABLE_PERF_OVERLAY_STRING = "checkbox_enable_perf_overlay";
+    private static final String ENABLE_VIDEO_CAPTURE_STRING = "checkbox_enable_video_capture";
+    private static final String VIDEO_CAPTURE_CAP_MB_STRING = "seekbar_video_capture_cap_mb";
+    private static final String ENABLE_FRAME_STATS_CAPTURE_STRING = "checkbox_enable_frame_stats_capture";
     private static final String BIND_ALL_USB_STRING = "checkbox_usb_bind_all";
     private static final String MOUSE_EMULATION_STRING = "checkbox_mouse_emulation";
     private static final String ANALOG_SCROLLING_PREF_STRING = "analog_scrolling";
@@ -88,6 +91,9 @@ public class PreferenceConfiguration {
     private static final boolean DEFAULT_ENABLE_HDR = false;
     private static final boolean DEFAULT_ENABLE_PIP = false;
     private static final boolean DEFAULT_ENABLE_PERF_OVERLAY = false;
+    private static final boolean DEFAULT_ENABLE_VIDEO_CAPTURE = false;
+    private static final int DEFAULT_VIDEO_CAPTURE_CAP_MB = 1024;
+    private static final boolean DEFAULT_ENABLE_FRAME_STATS_CAPTURE = true;
     private static final boolean DEFAULT_BIND_ALL_USB = false;
     private static final boolean DEFAULT_MOUSE_EMULATION = true;
     private static final String DEFAULT_ANALOG_STICK_FOR_SCROLLING = "right";
@@ -136,6 +142,9 @@ public class PreferenceConfiguration {
     public boolean enableHdr;
     public boolean enablePip;
     public boolean enablePerfOverlay;
+    public boolean enableVideoCapture;
+    public int videoCaptureCapMb;
+    public boolean enableFrameStatsCapture;
     public boolean enableLatencyToast;
     public boolean bindAllUsb;
     public boolean mouseEmulation;
@@ -601,6 +610,10 @@ public class PreferenceConfiguration {
         config.gamepadTouchpadAsMouse = prefs.getBoolean(GAMEPAD_TOUCHPAD_AS_MOUSE_PREF_STRING, DEFAULT_GAMEPAD_TOUCHPAD_AS_MOUSE);
         config.gamepadMotionSensors = prefs.getBoolean(GAMEPAD_MOTION_SENSORS_PREF_STRING, DEFAULT_GAMEPAD_MOTION_SENSORS);
         config.gamepadMotionSensorsFallbackToDevice = prefs.getBoolean(GAMEPAD_MOTION_FALLBACK_PREF_STRING, DEFAULT_GAMEPAD_MOTION_FALLBACK);
+        // Video capture preferences
+        config.enableVideoCapture = prefs.getBoolean(ENABLE_VIDEO_CAPTURE_STRING, DEFAULT_ENABLE_VIDEO_CAPTURE);
+        config.videoCaptureCapMb = prefs.getInt(VIDEO_CAPTURE_CAP_MB_STRING, DEFAULT_VIDEO_CAPTURE_CAP_MB);
+        config.enableFrameStatsCapture = prefs.getBoolean(ENABLE_FRAME_STATS_CAPTURE_STRING, DEFAULT_ENABLE_FRAME_STATS_CAPTURE);
 
         return config;
     }

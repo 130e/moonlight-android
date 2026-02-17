@@ -1,5 +1,37 @@
 # Moonlight Android
 
+## Frame metrics support
+
+Added support for exporting frame metrics and video frames.
+
+- Ensure Android NDK is installed and set in `local.properties`
+- Build the APK (JDK 17)
+```shell
+./gradlew :app:assembleNonRootDebug # or :app:assembleRootDebug for rooted builds
+```
+- Install APK to device
+
+### Experiment
+
+- Enable the capture option in settings and set the capture size limit
+- Connect to a host and stream
+
+The captures are saved in the external storage, `/storage/emulated/0/Android/data/com.limelight.debug/files/captures/`.
+Each stream will have its own directory with the following files:
+- `session.json`: Session metadata.
+- `frame_stats.jsonl`: Frame metrics exported on decoded units.
+- `sample_index.jsonl`: Sample index. Indicate where the encoded frames are located in the raw video file.
+- `video.<ext>`: Raw encoded frames dumped. Extension is determined by the video format.
+
+To pull the captures to your machine:
+```shell
+adb pull /storage/emulated/0/Android/data/com.limelight.debug/files/captures/
+```
+
+**WIP**: Write a script to convert the video captures to YUV frames based on the sample index.
+
+## Original README
+
 [![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/232a8tadrrn8jv0k/branch/master?svg=true)](https://ci.appveyor.com/project/cgutman/moonlight-android/branch/master)
 [![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-android/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-android/)
 

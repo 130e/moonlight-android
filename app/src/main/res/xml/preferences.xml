@@ -264,6 +264,29 @@
             android:summary="@string/summary_enable_perf_overlay"
             android:defaultValue="false"/>
         <CheckBoxPreference
+            android:key="checkbox_enable_video_capture"
+            android:title="@string/title_enable_video_capture"
+            android:summary="@string/summary_enable_video_capture"
+            android:defaultValue="false"/>
+        <com.limelight.preferences.SeekBarPreference
+            android:key="seekbar_video_capture_cap_mb"
+            android:dependency="checkbox_enable_video_capture"
+            android:defaultValue="1024"
+            seekbar:min="128"
+            android:max="8192"
+            seekbar:step="128"
+            seekbar:keyStep="256"
+            seekbar:divisor="1"
+            android:summary="@string/summary_video_capture_cap_mb"
+            android:text="@string/suffix_video_capture_cap_mb"
+            android:title="@string/title_video_capture_cap_mb"/>
+        <CheckBoxPreference
+            android:key="checkbox_enable_frame_stats_capture"
+            android:dependency="checkbox_enable_video_capture"
+            android:title="@string/title_enable_frame_stats_capture"
+            android:summary="@string/summary_enable_frame_stats_capture"
+            android:defaultValue="true"/>
+        <CheckBoxPreference
             android:key="checkbox_enable_post_stream_toast"
             android:title="@string/title_enable_post_stream_toast"
             android:summary="@string/summary_enable_post_stream_toast"
