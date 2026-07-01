@@ -1,0 +1,102 @@
+diff --git a/src/Limelight.h b/src/Limelight.h
+index bc0a2e3..55eb683 100644
+--- a/src/Limelight.h
++++ b/src/Limelight.h
+@@ -545,6 +545,14 @@ const char* LiGetStageName(int stage);
+ // This function may only be called between LiStartConnection() and LiStopConnection().
+ bool LiGetEstimatedRttInfo(uint32_t* estimatedRtt, uint32_t* estimatedRttVariance);
+ 
++// This function returns cumulative downlink video packet counters since the start of the
++// current connection, for coarse network packet-loss estimation. "Expected" counts are
++// booked per FEC block as frames arrive (including frames never fully received), so
++// (expected - received) approximates downlink packet loss. Any pointer may be NULL.
++// (Non-upstream addition for stats capture.)
++void LiGetVideoPacketStats(uint32_t* expectedDataPackets, uint32_t* receivedDataPackets,
++                           uint32_t* expectedParityPackets, uint32_t* receivedParityPackets);
++
+ // This function queues a relative mouse move event to be sent to the remote server.
+ int LiSendMouseMoveEvent(short deltaX, short deltaY);
+ 
+diff --git a/src/RtpVideoQueue.c b/src/RtpVideoQueue.c
+index d5dbe94..a5548d6 100644
+--- a/src/RtpVideoQueue.c
++++ b/src/RtpVideoQueue.c
+@@ -1,6 +1,8 @@
+ #include "Limelight-internal.h"
+ #include "rs.h"
+ 
++#include <stdatomic.h>
++
+ #if defined(LC_DEBUG) && !defined(LC_FUZZING)
+ // This enables FEC validation mode with a synthetic drop
+ // and recovered packet checks vs the original input. It
+@@ -16,12 +18,44 @@
+ // RTP packets use a 90 KHz presentation timestamp clock
+ #define PTS_DIVISOR 90
+ 
++// Cumulative coarse video packet counters for downlink network-loss estimation.
++// "Expected" is booked once per FEC block at block init (so totally-lost frames still
++// count), "received" is incremented per accepted packet. Lost = expected - received.
++// These are read across threads from a JNI getter, so use relaxed atomics (no mutex
++// needed for coarse monotonic counters).
++static atomic_uint_least32_t g_expectedDataPackets;
++static atomic_uint_least32_t g_receivedDataPackets;
++static atomic_uint_least32_t g_expectedParityPackets;
++static atomic_uint_least32_t g_receivedParityPackets;
++
++void LiGetVideoPacketStats(uint32_t* expectedDataPackets, uint32_t* receivedDataPackets,
++                           uint32_t* expectedParityPackets, uint32_t* receivedParityPackets) {
++    if (expectedDataPackets != NULL) {
++        *expectedDataPackets = atomic_load_explicit(&g_expectedDataPackets, memory_order_relaxed);
++    }
++    if (receivedDataPackets != NULL) {
++        *receivedDataPackets = atomic_load_explicit(&g_receivedDataPackets, memory_order_relaxed);
++    }
++    if (expectedParityPackets != NULL) {
++        *expectedParityPackets = atomic_load_explicit(&g_expectedParityPackets, memory_order_relaxed);
++    }
++    if (receivedParityPackets != NULL) {
++        *receivedParityPackets = atomic_load_explicit(&g_receivedParityPackets, memory_order_relaxed);
++    }
++}
++
+ void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
+     reed_solomon_init();
+     memset(queue, 0, sizeof(*queue));
+ 
+     queue->currentFrameNumber = 1;
+     queue->multiFecCapable = APP_VERSION_AT_LEAST(7, 1, 431);
++
++    // Reset the cumulative packet counters for this session
++    atomic_store_explicit(&g_expectedDataPackets, 0, memory_order_relaxed);
++    atomic_store_explicit(&g_receivedDataPackets, 0, memory_order_relaxed);
++    atomic_store_explicit(&g_expectedParityPackets, 0, memory_order_relaxed);
++    atomic_store_explicit(&g_receivedParityPackets, 0, memory_order_relaxed);
+ }
+ 
+ static void purgeListEntries(PRTPV_QUEUE_LIST list) {
+@@ -702,6 +736,11 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+         queue->bufferDataPackets = (nvPacket->fecInfo & 0xFFC00000) >> 22;
+         queue->fecPercentage = (nvPacket->fecInfo & 0xFF0) >> 4;
+         queue->bufferParityPackets = (queue->bufferDataPackets * queue->fecPercentage + 99) / 100;
++
++        // Book the expected packet counts for this FEC block. Done here (before completion)
++        // so frames we never finish receiving still count toward the expected total.
++        atomic_fetch_add_explicit(&g_expectedDataPackets, queue->bufferDataPackets, memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_expectedParityPackets, queue->bufferParityPackets, memory_order_relaxed);
+         queue->bufferFirstParitySequenceNumber = U16(queue->bufferLowestSequenceNumber + queue->bufferDataPackets);
+         queue->bufferHighestSequenceNumber = U16(queue->bufferFirstParitySequenceNumber + queue->bufferParityPackets - 1);
+         queue->multiFecCurrentBlockNumber = fecCurrentBlockNumber;
+@@ -757,10 +796,12 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
+         if (isBefore16(packet->sequenceNumber, queue->bufferFirstParitySequenceNumber)) {
+             queue->receivedDataPackets++;
+             LC_ASSERT(queue->receivedDataPackets <= queue->bufferDataPackets);
++            atomic_fetch_add_explicit(&g_receivedDataPackets, 1, memory_order_relaxed);
+         }
+         else {
+             queue->receivedParityPackets++;
+             LC_ASSERT(queue->receivedParityPackets <= queue->bufferParityPackets);
++            atomic_fetch_add_explicit(&g_receivedParityPackets, 1, memory_order_relaxed);
+         }
+         
+         // Try to submit this frame. If we haven't received enough packets,

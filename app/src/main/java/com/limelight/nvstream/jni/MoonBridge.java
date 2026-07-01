@@ -408,6 +408,11 @@ public class MoonBridge {
     // The RTT is in the top 32 bits, and the RTT variance is in the bottom 32 bits
     public static native long getEstimatedRttInfo();
 
+    // Fills out[0..3] with cumulative video packet counters for coarse loss estimation:
+    // {expectedDataPackets, receivedDataPackets, expectedParityPackets, receivedParityPackets}.
+    // Returns false if the array is null or too small.
+    public static native boolean getVideoPacketStats(long[] out);
+
     public static native String getLaunchUrlQueryParameters();
 
     public static native byte guessControllerType(int vendorId, int productId);

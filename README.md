@@ -6,6 +6,7 @@ This branch adds optional stream capture for offline analysis:
 - Raw encoded video units (`video.<ext>`)
 - Per-sample index records (`sample_index.jsonl`)
 - Per-frame stats records (`frame_stats.jsonl`, optional)
+- Rolling network status records (`network_stats.jsonl`, optional)
 - Session metadata (`session.json`)
 
 ### Build and install
@@ -18,6 +19,13 @@ sdk.dir={HOME}/Android/Sdk
 - Fetch submodules:
 ```shell
 git submodule update --init --recursive
+```
+- Apply the `moonlight-common-c` patch (adds the RTP video packet-loss counters used by
+  `network_stats.jsonl`). The submodule tracks upstream `moonlight-stream/moonlight-common-c`
+  at `8af4562`. The modification is kept as a patch rather than a separate submodule fork:
+```shell
+git apply --directory=app/src/main/jni/moonlight-core/moonlight-common-c \
+    patches/moonlight-common-c-netstats.patch
 ```
 - Build (JDK 17+):
 ```shell
@@ -88,13 +96,36 @@ Event payloads:
 - `capture_mode`: `video_format`, `reason`
 - `frame_received`: `frame_number`, `frame_type`, `decode_unit_length`, `host_processing_latency_0_1ms`, `receive_time_ms`, `enqueue_time_ms`, `pts_us`
 - `frame_decoded`: `frame_number`, `frame_type`, `pts_us`, `decoder_latency_ms`, `queue_delay_ms` (or fallback `-1` for frame metadata when unmatched)
+- `network_frame_drop`: `previous_frame_number`, `next_frame_number`, `dropped_frame_count`, `first_dropped_frame_number`, `last_dropped_frame_number`
+- `jitter_frame_drop`: `frame_number`, `frame_type`, `pts_us`, `reason` (or fallback `-1` for frame metadata when unmatched)
 - `capture_stopped`: `reason`
 - `session_end`: `reason`, `estimated_video_bytes`, `cap_reached`
 
-### How stats are collected
+#### `network_stats.jsonl` (JSON Lines, optional)
+Written only when `Save per-frame statistics` is enabled. Captures the rolling network
+condition (RTT and downlink video packet loss) sampled roughly once per second, rather than
+per frame. Every record includes:
+- `event`
+- `uptime_ms`
+
+Event payloads:
+- `session_start`: `codec`, `width`, `height`, `fps`
+- `network_stats`:
+  - `enet_rtt_ms`, `enet_rtt_variance_ms` — ENet control-channel RTT estimate at sample time (`-1` if the peer is not connected)
+  - `expected_data_packets`, `received_data_packets`, `lost_data_packets` — cumulative video data-packet counts since connection start (`lost = expected - received`)
+  - `expected_parity_packets`, `received_parity_packets`, `lost_parity_packets` — cumulative FEC parity-packet counts
+  - `window_expected_data_packets`, `window_received_data_packets`, `window_lost_data_packets` — deltas over the sample window
+  - `window_expected_parity_packets`, `window_received_parity_packets` — parity deltas over the window
+  - `window_data_loss_ratio` — `window_lost_data_packets / window_expected_data_packets` for the window (`0` on the first sample)
+- `session_end`: `reason`
+
+### Inferred stats
 
 - `frame_received` and index records are emitted when decode units arrive at the decoder input path (`onDecodeUnit`).
 - `frame_decoded` is emitted when the frame is released from `MediaCodec` output (`onFrameDecoded`), using PTS to match received metadata.
+- `network_frame_drop` is emitted when frame-number gaps are detected at the decoder input path.
+- `jitter_frame_drop` is emitted when decoded output is discarded by renderer pacing before display submission.
+- `network_stats` is sampled at the ~1 s stats-window flip (not per frame): RTT comes from ENet (`MoonBridge.getEstimatedRttInfo`) and packet counts from the RTP layer (`MoonBridge.getVideoPacketStats`). The packet counters are cumulative and FEC-aware; "expected" is booked per FEC block as frames arrive, so frames never fully received still count toward loss.
 - Raw bytes are written continuously until the session ends or the configured size cap is reached.
 - Hitting the cap stops capture only (streaming continues), records `capture_stopped`/`session_end`, and shows a toast on device.
 

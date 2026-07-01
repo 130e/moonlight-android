@@ -43,6 +43,7 @@ class VideoCaptureSession {
     private final int fps;
     private final Runnable capReachedCallback;
     private final Map<Long, FrameMeta> framesByPtsUs = new HashMap<>();
+    private final Map<Long, FrameMeta> decodedFramesByPtsUs = new HashMap<>();
     private final File sessionDir;
 
     private boolean closed;
@@ -51,7 +52,14 @@ class VideoCaptureSession {
 
     private BufferedWriter statsWriter;
     private BufferedWriter indexWriter;
+    private BufferedWriter networkWriter;
     private OutputStream rawVideoStream;
+
+    private boolean hasPrevNetworkSample;
+    private long prevExpectedDataPackets;
+    private long prevReceivedDataPackets;
+    private long prevExpectedParityPackets;
+    private long prevReceivedParityPackets;
     private File videoFile;
     private File indexFile;
     private long fileWriteOffset;
@@ -105,6 +113,7 @@ class VideoCaptureSession {
 
         writeSessionMetadata(codecLabel);
         initializeStatsWriter(codecLabel);
+        initializeNetworkWriter(codecLabel);
         initializeIndexWriter(codecLabel);
         writeStatsEvent("capture_mode", "\"video_format\":\"raw\",\"reason\":\"raw_only_forced\"");
     }
@@ -156,6 +165,7 @@ class VideoCaptureSession {
 
         FrameMeta meta = framesByPtsUs.remove(presentationTimeUs);
         if (meta != null) {
+            decodedFramesByPtsUs.put(presentationTimeUs, meta);
             writeStatsEvent("frame_decoded",
                     "\"frame_number\":" + meta.frameNumber +
                     ",\"frame_type\":" + meta.frameType +
@@ -171,11 +181,111 @@ class VideoCaptureSession {
         }
     }
 
+    synchronized void onFrameSubmitted(long presentationTimeUs) {
+        if (closed || !statsEnabled) {
+            return;
+        }
+
+        decodedFramesByPtsUs.remove(presentationTimeUs);
+    }
+
+    synchronized void onNetworkFrameDrop(int previousFrameNumber, int nextFrameNumber) {
+        if (closed || !statsEnabled) {
+            return;
+        }
+
+        int droppedFrameCount = nextFrameNumber - previousFrameNumber - 1;
+        if (droppedFrameCount <= 0) {
+            return;
+        }
+
+        writeStatsEvent("network_frame_drop",
+                "\"previous_frame_number\":" + previousFrameNumber +
+                ",\"next_frame_number\":" + nextFrameNumber +
+                ",\"dropped_frame_count\":" + droppedFrameCount +
+                ",\"first_dropped_frame_number\":" + (previousFrameNumber + 1) +
+                ",\"last_dropped_frame_number\":" + (nextFrameNumber - 1));
+    }
+
+    synchronized void onJitterFrameDrop(long presentationTimeUs, String reason) {
+        if (closed || !statsEnabled) {
+            return;
+        }
+
+        FrameMeta meta = framesByPtsUs.remove(presentationTimeUs);
+        if (meta == null) {
+            meta = decodedFramesByPtsUs.remove(presentationTimeUs);
+        }
+        if (meta != null) {
+            writeStatsEvent("jitter_frame_drop",
+                    "\"frame_number\":" + meta.frameNumber +
+                    ",\"frame_type\":" + meta.frameType +
+                    ",\"pts_us\":" + presentationTimeUs +
+                    ",\"reason\":\"" + escapeJson(reason) + "\"");
+        } else {
+            writeStatsEvent("jitter_frame_drop",
+                    "\"frame_number\":-1" +
+                    ",\"frame_type\":-1" +
+                    ",\"pts_us\":" + presentationTimeUs +
+                    ",\"reason\":\"" + escapeJson(reason) + "\"");
+        }
+    }
+
+    synchronized void onNetworkStatsSample(int rttMs, int rttVarianceMs,
+                                           long expectedDataPackets, long receivedDataPackets,
+                                           long expectedParityPackets, long receivedParityPackets) {
+        if (closed || !statsEnabled) {
+            return;
+        }
+
+        long lostDataPackets = Math.max(0, expectedDataPackets - receivedDataPackets);
+        long lostParityPackets = Math.max(0, expectedParityPackets - receivedParityPackets);
+
+        long windowExpectedData = 0;
+        long windowReceivedData = 0;
+        long windowLostData = 0;
+        long windowExpectedParity = 0;
+        long windowReceivedParity = 0;
+        if (hasPrevNetworkSample) {
+            windowExpectedData = Math.max(0, expectedDataPackets - prevExpectedDataPackets);
+            windowReceivedData = Math.max(0, receivedDataPackets - prevReceivedDataPackets);
+            windowLostData = Math.max(0, windowExpectedData - windowReceivedData);
+            windowExpectedParity = Math.max(0, expectedParityPackets - prevExpectedParityPackets);
+            windowReceivedParity = Math.max(0, receivedParityPackets - prevReceivedParityPackets);
+        }
+
+        prevExpectedDataPackets = expectedDataPackets;
+        prevReceivedDataPackets = receivedDataPackets;
+        prevExpectedParityPackets = expectedParityPackets;
+        prevReceivedParityPackets = receivedParityPackets;
+        hasPrevNetworkSample = true;
+
+        double windowDataLossRatio = windowExpectedData > 0
+                ? (double) windowLostData / windowExpectedData : 0.0;
+
+        writeNetworkEvent("network_stats",
+                "\"enet_rtt_ms\":" + rttMs +
+                ",\"enet_rtt_variance_ms\":" + rttVarianceMs +
+                ",\"expected_data_packets\":" + expectedDataPackets +
+                ",\"received_data_packets\":" + receivedDataPackets +
+                ",\"lost_data_packets\":" + lostDataPackets +
+                ",\"expected_parity_packets\":" + expectedParityPackets +
+                ",\"received_parity_packets\":" + receivedParityPackets +
+                ",\"lost_parity_packets\":" + lostParityPackets +
+                ",\"window_expected_data_packets\":" + windowExpectedData +
+                ",\"window_received_data_packets\":" + windowReceivedData +
+                ",\"window_lost_data_packets\":" + windowLostData +
+                ",\"window_expected_parity_packets\":" + windowExpectedParity +
+                ",\"window_received_parity_packets\":" + windowReceivedParity +
+                ",\"window_data_loss_ratio\":" + String.format(Locale.US, "%.6f", windowDataLossRatio));
+    }
+
     synchronized void onSessionEnd(String reason) {
         if (closed) {
             return;
         }
 
+        writeNetworkEvent("session_end", "\"reason\":\"" + escapeJson(reason) + "\"");
         writeIndexEvent("session_end",
                 "\"reason\":\"" + escapeJson(reason) + "\"" +
                 ",\"estimated_video_bytes\":" + estimatedVideoBytes +
@@ -249,6 +359,15 @@ class VideoCaptureSession {
             statsWriter = null;
         }
 
+        if (networkWriter != null) {
+            try {
+                networkWriter.flush();
+                networkWriter.close();
+            } catch (IOException ignored) {
+            }
+            networkWriter = null;
+        }
+
         if (indexWriter != null) {
             try {
                 indexWriter.flush();
@@ -279,6 +398,26 @@ class VideoCaptureSession {
         } catch (IOException e) {
             LimeLog.severe("Failed to open stats file: " + e);
             statsWriter = null;
+        }
+    }
+
+    private void initializeNetworkWriter(String codecLabel) {
+        if (!statsEnabled || sessionDir == null) {
+            return;
+        }
+
+        File networkFile = new File(sessionDir, "network_stats.jsonl");
+        try {
+            networkWriter = new BufferedWriter(new OutputStreamWriter(
+                    new FileOutputStream(networkFile, false), StandardCharsets.UTF_8));
+            writeNetworkEvent("session_start",
+                    "\"codec\":\"" + codecLabel + "\"" +
+                    ",\"width\":" + width +
+                    ",\"height\":" + height +
+                    ",\"fps\":" + fps);
+        } catch (IOException e) {
+            LimeLog.severe("Failed to open network stats file: " + e);
+            networkWriter = null;
         }
     }
 
@@ -341,6 +480,24 @@ class VideoCaptureSession {
             statsWriter.write(line);
         } catch (IOException e) {
             LimeLog.warning("Failed to write stats event: " + e);
+        }
+    }
+
+    private void writeNetworkEvent(String type, String fields) {
+        if (networkWriter == null || closed) {
+            return;
+        }
+
+        String line = "{"
+                + "\"event\":\"" + escapeJson(type) + "\","
+                + "\"uptime_ms\":" + SystemClock.uptimeMillis()
+                + (fields.isEmpty() ? "" : "," + fields)
+                + "}\n";
+
+        try {
+            networkWriter.write(line);
+        } catch (IOException e) {
+            LimeLog.warning("Failed to write network stats event: " + e);
         }
     }
 

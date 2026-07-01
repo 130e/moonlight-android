@@ -212,6 +212,26 @@ Java_com_limelight_nvstream_jni_MoonBridge_getEstimatedRttInfo(JNIEnv *env, jcla
     return ((uint64_t)rtt << 32U) | variance;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_getVideoPacketStats(JNIEnv *env, jclass clazz, jlongArray out) {
+    uint32_t expectedData, receivedData, expectedParity, receivedParity;
+
+    if (out == NULL || (*env)->GetArrayLength(env, out) < 4) {
+        return JNI_FALSE;
+    }
+
+    LiGetVideoPacketStats(&expectedData, &receivedData, &expectedParity, &receivedParity);
+
+    jlong values[4] = {
+        (jlong)expectedData,
+        (jlong)receivedData,
+        (jlong)expectedParity,
+        (jlong)receivedParity,
+    };
+    (*env)->SetLongArrayRegion(env, out, 0, 4, values);
+    return JNI_TRUE;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_getLaunchUrlQueryParameters(JNIEnv *env, jclass clazz) {
     return (*env)->NewStringUTF(env, LiGetLaunchUrlQueryParameters());

@@ -113,13 +113,26 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private VideoStats globalVideoStats;
     private VideoCaptureSession captureSession;
     private boolean captureCapToastShown;
+    // Reusable scratch buffer for MoonBridge.getVideoPacketStats() to avoid per-window allocation.
+    // Only touched on the decoder submit thread during the once-per-second window flip.
+    private final long[] videoPacketStatsBuffer = new long[4];
 
     private long lastTimestampUs;
     private int lastFrameNumber;
     private int refreshRate;
     private PreferenceConfiguration prefs;
 
-    private LinkedBlockingQueue<Integer> outputBufferQueue = new LinkedBlockingQueue<>();
+    private static class OutputBufferInfo {
+        final int index;
+        final long presentationTimeUs;
+
+        OutputBufferInfo(int index, long presentationTimeUs) {
+            this.index = index;
+            this.presentationTimeUs = presentationTimeUs;
+        }
+    }
+
+    private LinkedBlockingQueue<OutputBufferInfo> outputBufferQueue = new LinkedBlockingQueue<>();
     private static final int OUTPUT_BUFFER_QUEUE_LIMIT = 2;
     private long lastRenderedFrameTimeNanos;
     private HandlerThread choreographerHandlerThread;
@@ -1013,22 +1026,26 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             // NB: Since the queue limit is 2, we won't starve the decoder of output buffers
             // by holding onto them for too long. This also ensures we will have that 1 extra
             // frame of buffer to smooth over network/rendering jitter.
-            Integer nextOutputBuffer = outputBufferQueue.poll();
+            OutputBufferInfo nextOutputBuffer = outputBufferQueue.poll();
             if (nextOutputBuffer != null) {
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
+                        videoDecoder.releaseOutputBuffer(nextOutputBuffer.index, frameTimeNanos);
                     }
                     else {
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, true);
+                        videoDecoder.releaseOutputBuffer(nextOutputBuffer.index, true);
                     }
 
                     lastRenderedFrameTimeNanos = frameTimeNanos;
                     activeWindowVideoStats.totalFramesRendered++;
+                    VideoCaptureSession localCaptureSession = captureSession;
+                    if (localCaptureSession != null && localCaptureSession.isActive()) {
+                        localCaptureSession.onFrameSubmitted(nextOutputBuffer.presentationTimeUs);
+                    }
                 } catch (IllegalStateException ignored) {
                     try {
                         // Try to avoid leaking the output buffer by releasing it without rendering
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, false);
+                        videoDecoder.releaseOutputBuffer(nextOutputBuffer.index, false);
                     } catch (IllegalStateException e) {
                         // This will leak nextOutputBuffer, but there's really nothing else we can do
                         e.printStackTrace();
@@ -1086,6 +1103,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             if (prefs.framePacing != PreferenceConfiguration.FRAME_PACING_BALANCED) {
                                 // Get the last output buffer in the queue
                                 while ((outIndex = videoDecoder.dequeueOutputBuffer(info, 0)) >= 0) {
+                                    VideoCaptureSession localCaptureSession = captureSession;
+                                    if (localCaptureSession != null && localCaptureSession.isActive()) {
+                                        localCaptureSession.onJitterFrameDrop(presentationTimeUs, "superseded_output_buffer");
+                                    }
                                     videoDecoder.releaseOutputBuffer(lastIndex, false);
 
                                     numFramesOut++;
@@ -1129,7 +1150,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 // refresh rate).
                                 if (outputBufferQueue.size() == OUTPUT_BUFFER_QUEUE_LIMIT) {
                                     try {
-                                        videoDecoder.releaseOutputBuffer(outputBufferQueue.take(), false);
+                                        OutputBufferInfo droppedBuffer = outputBufferQueue.take();
+                                        VideoCaptureSession localCaptureSession = captureSession;
+                                        if (localCaptureSession != null && localCaptureSession.isActive()) {
+                                            localCaptureSession.onJitterFrameDrop(droppedBuffer.presentationTimeUs, "output_queue_full");
+                                        }
+                                        videoDecoder.releaseOutputBuffer(droppedBuffer.index, false);
                                     } catch (InterruptedException e) {
                                         // We're shutting down, so we can just drop this buffer on the floor
                                         // and it will be reclaimed when the codec is released.
@@ -1138,7 +1164,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 }
 
                                 // Add this buffer
-                                outputBufferQueue.add(lastIndex);
+                                outputBufferQueue.add(new OutputBufferInfo(lastIndex, presentationTimeUs));
                             }
 
                             // Add delta time to the totals (excluding probable outliers)
@@ -1153,6 +1179,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             VideoCaptureSession localCaptureSession = captureSession;
                             if (localCaptureSession != null && localCaptureSession.isActive()) {
                                 localCaptureSession.onFrameDecoded(presentationTimeUs, delta);
+                                if (prefs.framePacing != PreferenceConfiguration.FRAME_PACING_BALANCED) {
+                                    localCaptureSession.onFrameSubmitted(presentationTimeUs);
+                                }
                             }
                         } else {
                             switch (outIndex) {
@@ -1445,6 +1474,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         } else if (frameNumber != lastFrameNumber && frameNumber != lastFrameNumber + 1) {
             // We can receive the same "frame" multiple times if it's an IDR frame.
             // In that case, each frame start NALU is submitted independently.
+            VideoCaptureSession localCaptureSession = captureSession;
+            if (localCaptureSession != null && localCaptureSession.isActive()) {
+                localCaptureSession.onNetworkFrameDrop(lastFrameNumber, frameNumber);
+            }
             activeWindowVideoStats.framesLost += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.totalFrames += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.frameLossEvents++;
@@ -1461,6 +1494,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         // Flip stats windows roughly every second
         if (SystemClock.uptimeMillis() >= activeWindowVideoStats.measurementStartTimestamp + 1000) {
+            // Sample the current network RTT once per window, shared by the perf overlay
+            // and the network stats capture below.
+            long rttInfo = MoonBridge.getEstimatedRttInfo();
+
             if (prefs.enablePerfOverlay) {
                 VideoStats lastTwo = new VideoStats();
                 lastTwo.add(lastWindowVideoStats);
@@ -1479,7 +1516,6 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
 
                 float decodeTimeMs = (float)lastTwo.decoderTimeMs / lastTwo.totalFramesReceived;
-                long rttInfo = MoonBridge.getEstimatedRttInfo();
                 StringBuilder sb = new StringBuilder();
                 sb.append(context.getString(R.string.perf_overlay_streamdetails, initialWidth + "x" + initialHeight, fps.totalFps)).append('\n');
                 sb.append(context.getString(R.string.perf_overlay_decoder, decoder)).append('\n');
@@ -1497,6 +1533,24 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
                 sb.append(context.getString(R.string.perf_overlay_dectime, decodeTimeMs));
                 perfListener.onPerfUpdate(sb.toString());
+            }
+
+            // Sample the rolling network status (RTT + packet loss) once per window into
+            // the capture session's network_stats log, independent of the perf overlay.
+            VideoCaptureSession localCaptureSession = captureSession;
+            if (localCaptureSession != null && localCaptureSession.isActive()) {
+                int rttMs = -1;
+                int rttVarianceMs = -1;
+                if (rttInfo != -1) {
+                    rttMs = (int)(rttInfo >> 32);
+                    rttVarianceMs = (int)rttInfo;
+                }
+
+                if (MoonBridge.getVideoPacketStats(videoPacketStatsBuffer)) {
+                    localCaptureSession.onNetworkStatsSample(rttMs, rttVarianceMs,
+                            videoPacketStatsBuffer[0], videoPacketStatsBuffer[1],
+                            videoPacketStatsBuffer[2], videoPacketStatsBuffer[3]);
+                }
             }
 
             globalVideoStats.add(activeWindowVideoStats);
